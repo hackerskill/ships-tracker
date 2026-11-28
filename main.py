@@ -9,16 +9,29 @@ load_dotenv()
 
 app_token=os.environ.get("SLACK_APP_TOKEN")
 bot_token=os.environ.get("SLACK_BOT_TOKEN")
+signing_secret=os.environ.get("SLACK_SIGNING_SECRET")
 program_base_url=os.environ.get("PROGRAMS_BASE_URL")
+channelmanager_base_url=os.environ.get("CHANNELMANAGER_BASE_URL")
 channel_id=os.environ.get("SLACK_NOTIFICATION_CHANNEL_ID")
 
-app=App(token=bot_token)
+app=App(token=bot_token, signing_secret=signing_secret)
 COUNT=5
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
+
+def user_is_cm(channel_id):
+    try:
+        r=requests.get(f"{channelmanager_base_url}/cman/{channel_id}", timeout=30)
+        r.raise_for_status()
+        if r.json().get("error"):
+            return None
+        else:
+            return r.json().get("data")
+    except requests.RequestException:
+        return False
 
 def fetch_programs():
     r=requests.get(f"{program_base_url}/api/v1/ysws/list", timeout=30)
@@ -62,7 +75,7 @@ def is_url(url):
     return isinstance(url, str) and url.startswith(("http://", "https://"))
 
 def build_blocks(program, rank, image_url):
-    name=program["display_name"] or f"Project {program['id']}"
+    name=program["inferred_repo"] or f"Project {program['id']}"
     desc=(program["description"] or "No description").strip()
     if len(desc) > 500:
         desc=desc[:497]+"..."
@@ -94,6 +107,14 @@ def handle_some_command(ack, respond, command, logger, client):
     logger.info(f"Called by {command['user_name']}({command['user_id']}) in channel {command['channel_name']}({command['channel_id']}) using command {command['command']}")
     raw=command.get("text", "").strip()
     channel_id=command.get("channel_id")
+
+    if user_is_cm(channel_id) is None:
+        respond(f"Channel <#{channel_id}> is a private channel. This command can only be used in public channels.")
+        return
+    elif command['user_id'] not in user_is_cm(channel_id):
+        respond(f"You are not a channel manager for the <#{channel_id}>. Only channel managers can use this command.")
+        return
+
     text=raw.split()
 
     if not raw:
@@ -110,14 +131,18 @@ def handle_some_command(ack, respond, command, logger, client):
 
     if check_program_exists(program_name):
         respond(f"Sending top {COUNT} projects from {program_name} in channel <#{channel_id}>...")
-        for i in range(COUNT):
-            program=fetch_projects(COUNT, program_name)[i]
-            blocks=build_blocks(program, i+1, fetch_image(program))
-            respond(blocks=blocks)
+        projects=fetch_projects(COUNT, program_name)
+        print(f"Fetched {len(projects)} projects for program {program_name}")    
+        for i, p in enumerate(projects):
+            blocks=build_blocks(p, i+1, fetch_image(p))
+            client.chat_postMessage(channel=channel_id, text=f"Project #{i+1}", blocks=blocks)
         return
     else:
         respond(f"Program {program_name} not found, please try again with exact program name.")
         return
 
 if __name__ == "__main__":
-    SocketModeHandler(app, app_token).start()
+    if app_token:
+        SocketModeHandler(app, app_token).start()
+    else:
+        app.start(port=int(os.environ.get("PORT", 3000)))
