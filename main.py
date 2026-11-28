@@ -45,6 +45,49 @@ def fetch_projects(n, program_name):
     r.raise_for_status()
     return r.json()["data"][:n]
 
+def fetch_image(project):
+    if not project["has_media"]:
+        return None
+    try:
+        r=requests.get(f"{program_base_url}/api/v1/media/{project['id']}", timeout=30)
+        r.raise_for_status()
+        for media in r.json():
+            if media.get("mime_type", "").startswith("image/"):
+                return media["thumb_large_url"] or media["url"]
+    except requests.RequestException:
+        pass
+    return None
+
+def is_url(url):
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+def build_blocks(program, rank, image_url):
+    name=program["display_name"] or f"Project {program['id']}"
+    desc=(program["description"] or "No description").strip()
+    if len(desc) > 500:
+        desc=desc[:497]+"..."
+
+    stats=[f"⭐ {program['github_stars']}"]
+    stats.append(f"⏱ {program['hours']}h")
+
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn",
+            "text": f"*# {rank} {name}*\n{desc}\n{'  |  '.join(stats)}"}},
+    ]
+    if is_url(image_url):
+        blocks.append({"type": "image", "image_url": image_url, "alt_text": name})
+
+    buttons=[]
+    for label, key in [("Code", "code_url"), ("Demo", "demo_url"),
+                       ("Archived repo", "archived_repo"), ("Archived demo", "archived_demo")]:
+        if is_url(program[key]):
+            buttons.append({"type": "button", "text": {"type": "plain_text", "text": label},
+                            "url": program[key]})
+    if buttons:
+        blocks.append({"type": "actions", "elements": buttons})
+    blocks.append({"type": "divider"})
+    return blocks
+
 @app.command("/ships")
 def handle_some_command(ack, respond, command, logger, client):
     ack()
@@ -60,12 +103,17 @@ def handle_some_command(ack, respond, command, logger, client):
     if len(text) >= 2 and text[-1].isdigit():
         COUNT=int(text[-1])
         text.pop()
+    else:
+        COUNT=5
     program_name=" ".join(text)
     program_name=program_name.strip().lower().title()
 
     if check_program_exists(program_name):
         respond(f"Sending top {COUNT} projects from {program_name} in channel <#{channel_id}>...")
-        print(fetch_projects(COUNT, program_name))
+        for i in range(COUNT):
+            program=fetch_projects(COUNT, program_name)[i]
+            blocks=build_blocks(program, i+1, fetch_image(program))
+            respond(blocks=blocks)
         return
     else:
         respond(f"Program {program_name} not found, please try again with exact program name.")
